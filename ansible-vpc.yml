@@ -1,0 +1,184 @@
+---
+- name: Create VPC, Internet Gateway, Route Table, Subnet, and EC2 Instance
+  hosts: localhost
+  gather_facts: False
+  tasks:
+    - name: Create VPC
+      amazon.aws.ec2_vpc_net:
+        name: neyo-vpc
+        cidr_block: 10.0.0.0/16
+        region: eu-west-1
+        state: present
+        tags:
+          Name: absible-task
+      register: vpc_good
+
+    - name: Debug vpc_good
+      debug:
+        var: vpc_good  
+
+    - name: Create Internet gateway
+      amazon.aws.ec2_vpc_igw:
+        vpc_id: "{{ vpc_good.vpc.id }}"  
+        region: eu-west-1
+        state: present
+      register: igw_good  
+
+    - name: Create subnet for the VPC
+      amazon.aws.ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc_good.vpc.id }}"  
+        cidr: 10.0.1.0/24
+        tags:
+          Name: absible-task
+      register: subnet_good
+
+    - name: Set up public subnet route table
+      amazon.aws.ec2_vpc_route_table:
+        vpc_id: "{{ vpc_good.vpc.id }}"  
+        region: eu-west-1
+        state: present
+        tags:
+          Name: ansible-task
+        subnets:
+          - "{{ subnet_good.subnet.id }}"  
+        routes:
+          - dest: 0.0.0.0/0
+            gateway_id: "{{ igw_good.gateway_id }}"
+      register: route_table_good
+
+    - name: Create Security Group
+      ec2_group:
+        name: my-security-group
+        description: "Security group for my EC2 instance"
+        state: present
+        vpc_id: "{{ vpc_good.vpc.id }}"
+        region: eu-west-1
+        tags:
+          Name: ansible-task 
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: 0.0.0.0/0  # Allow SSH access from anywhere
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: 0.0.0.0/0  # Allow HTTP access from anywhere
+          - proto: icmp
+            from_port: -1
+            to_port: -1
+            cidr_ip: 0.0.0.0/0  # Allow ICMP (ping) from anywhere
+      register: security_group_good
+
+
+    - name: Check if private key file exists
+      stat:
+        path: "./aws.neyo-test-key.pem"
+      register: private_key_file
+
+    - name: Create a new EC2 keypair for SSH access
+      ec2_key:
+        name: neyo-test-key
+        region: eu-west-1
+        tags:
+          Name: ansible-task
+      register: ec2_key_result
+      when: private_key_file.stat.exists == false
+
+    - name: Save private key
+      copy:
+        content: "{{ ec2_key_result.key.private_key }}"
+        dest: "./aws.neyo-test-key.pem"
+        mode: 0400
+      when: ec2_key_result.changed
+
+    - name: start an instance with a public IP address
+      amazon.aws.ec2_instance:
+        name: public-compute-instance
+        state: present
+        key_name: neyo-test-key
+        region: eu-west-1
+        instance_type: t2.micro
+        image_id: ami-0905a3c97561e0b69
+        security_group: "{{ security_group_good.group_id }}"
+        vpc_subnet_id: "{{ subnet_good.subnet.id }}"
+        network:
+          assign_public_ip: true
+        tags:
+          name: ansible-task 
+      register: ec2_instance
+
+    - name: Display the public IP address of the instance 
+      debug:
+        var: ec2_instance.instances[0].public_ip_address  
+  
+    - name: Create the inventory file if it doesn't exist
+      stat:
+        path: ./inventory.ini
+      register: inventory_file_exists
+
+    - name: Create the inventory file if it doesn't exist
+      stat:
+        path: ./inventory.ini
+      register: inventory_file_exists
+
+    - name: Create the inventory file 
+      copy:
+        content: ""
+        dest: ./inventory.ini
+      when: not inventory_file_exists.stat.exists
+      poll: 0
+
+    - name: Remove existing block for my_ec2_instance
+      shell:
+        cmd: "sed -i '/^my_ec2_instance.*/d' ./inventory.ini"
+
+    - name: Add the host to the inventory
+      add_host:
+        name: my_ec2_instance
+        ansible_host: "{{ ec2_instance.instances[0].public_ip_address }}"
+        ansible_user: ubuntu
+
+    - name: Update the inventory file with the public IP of the ubuntu instance
+      lineinfile:
+        path: ./inventory.ini
+        line: "{{ 'my_ec2_instance ansible_host=' + ec2_instance.instances[0].public_ip_address }}"
+        create: yes
+  
+    - name: Wait for SSH to Become available
+      wait_for:
+        host: "{{ ec2_instance.instances[0].public_ip_address }}"
+        port: 22
+        state: started
+        timeout: 240      
+
+################################### 2nd Playbook ##########################################
+# This playbook will connect to the newly created EC2 instance and install Apache on it.
+###########################################################################################
+
+- name: Configure EC2 Instance
+  hosts: my_ec2_instance
+  become: yes
+  remote_user: ubuntu
+  vars:
+    ansible_ssh_private_key_file: "./aws.neyo-test-key.pem"
+  tasks:
+    - name: Update package cache
+      apt:
+        name: '*'
+        state: latest
+
+    - name: Install Nginx web server
+      apt:
+        name: nginx
+        state: present
+
+    - name: Start Nginx service
+      service:
+        name: nginx
+        state: started
+        enabled: yes        
+
+    
+
