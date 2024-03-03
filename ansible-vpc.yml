@@ -153,9 +153,9 @@
         state: started
         timeout: 240      
 
-################################### 2nd Playbook ##########################################
-# This playbook will connect to the newly created EC2 instance and install Apache on it.
-###########################################################################################
+################################### 2nd Playbook #################################################
+# This playbook will connect to the newly created EC2 instance and install Nginx web server on it.
+##################################################################################################
 
 - name: Configure EC2 Instance
   hosts: my_ec2_instance
